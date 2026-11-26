@@ -1,0 +1,6 @@
+﻿model,reasoning,reasoning_latency,tool_calling,tool_latency,structured_output,structured_latency,embedding,embedding_dimensions,embedding_latency
+gemini-3.1-flash-lite-preview,PASS,20.158,PASS,1.203,PASS,2.293,NOT_SUPPORTED,,
+gemini-3.5-flash-lite,PASS,2.269,PASS,1.324,PASS,0.722,NOT_SUPPORTED,,
+gemini-flash-lite-latest,PASS,2.026,PASS,1.322,PASS,1.331,NOT_SUPPORTED,,
+gemini-robotics-er-2-preview,PASS,3.472,PASS,1.325,PASS,1.319,NOT_SUPPORTED,,
+gemma-4-31b-it,PASS,39.105,ERROR,,ERROR,,NOT_SUPPORTED,,

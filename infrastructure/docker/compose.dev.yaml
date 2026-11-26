@@ -1,0 +1,17 @@
+
+services:
+  backend:
+    build:
+      secrets:
+        - source: corporate_ca
+          target: corporate_ca
+
+  frontend:
+    build:
+      secrets:
+        - source: corporate_ca
+          target: corporate_ca
+
+secrets:
+  corporate_ca:
+    file: ${CORPORATE_CA_FILE:?Set CORPORATE_CA_FILE in .env}

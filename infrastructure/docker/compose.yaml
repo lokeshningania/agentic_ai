@@ -1,0 +1,357 @@
+
+name: agentlab
+
+services:
+
+  # ==========================================
+  # APPLICATION
+  # ==========================================
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+      args:
+        APP_ENV: ${APP_ENV:-production}
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    ports:
+      - "127.0.0.1:8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      seaweedfs-init:
+        condition: service_completed_successfully
+    networks:
+      - agentlab
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        APP_ENV: ${APP_ENV:-production}
+        NEXT_PUBLIC_API_BASE_URL: ${BACKEND_URL}${API_V1_PREFIX}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: ${BACKEND_URL}${API_V1_PREFIX}
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      - backend
+    networks:
+      - agentlab
+
+  # ==========================================
+  # POSTGRESQL
+  # One server, two databases
+  # ==========================================
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
+      POSTGRES_DB: postgres
+
+      AGENTLAB_DB_NAME: ${POSTGRES_DB:-agentlab}
+      AGENTLAB_DB_USER: ${POSTGRES_USER:-agentlab}
+      AGENTLAB_DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+
+      LANGFUSE_DB_NAME: langfuse
+      LANGFUSE_DB_USER: langfuse
+      LANGFUSE_DB_PASSWORD: ${LANGFUSE_DB_PASSWORD:?Set LANGFUSE_DB_PASSWORD in .env}
+
+      TZ: UTC
+      PGTZ: UTC
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    networks:
+      - agentlab
+
+  # ==========================================
+  # VALKEY
+  # Shared cache and queue service
+  # ==========================================
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in .env}
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - valkey-cli -a "$$VALKEY_PASSWORD" ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - agentlab
+
+  # ==========================================
+  # QDRANT
+  # ==========================================
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - agentlab
+
+  # ==========================================
+  # SEAWEEDFS
+  # Single-node: Master + Volume + Filer + S3
+  # ==========================================
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+    
+    command:
+      - |
+        set -eu
+
+        cat > /tmp/s3.json <<EOF
+        {
+          "identities": [
+            {
+              "name": "agentlab",
+              "credentials": [
+                {
+                  "accessKey": "$${S3_ACCESS_KEY_ID}",
+                  "secretKey": "$${S3_SECRET_ACCESS_KEY}"
+                }
+              ],
+              "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+            }
+          ]
+        }
+        EOF
+
+        exec weed server \
+          -dir=/data \
+          -ip=seaweedfs \
+          -master.port=9333 \
+          -volume.port=8080 \
+          -filer.port=8888 \
+          -s3 \
+          -s3.port=8333 \
+          -s3.config=/tmp/s3.json
+    environment:
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID in .env}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY in .env}
+    ports:
+      - "127.0.0.1:${SEAWEEDFS_MASTER_HOST_PORT:-9333}:9333"
+      - "127.0.0.1:${SEAWEEDFS_FILER_HOST_PORT:-8888}:8888"
+    volumes:
+      - seaweedfs-data:/data
+    networks:
+      - agentlab
+
+  # ==========================================
+  # SEAWEEDFS BUCKET INITIALIZATION
+  # ==========================================
+
+
+  seaweedfs-init:
+    image: amazon/aws-cli:2.42.3
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        set -eu
+
+        mkdir -p /root/.aws
+
+        printf '%s\n' \
+          '[default]' \
+          's3 =' \
+          '    addressing_style = path' \
+          > /root/.aws/config
+
+        echo "Waiting for SeaweedFS S3 API..."
+
+        until aws --endpoint-url http://seaweedfs:8333 s3api list-buckets >/dev/null 2>&1; do
+          sleep 2
+        done
+
+        echo "Creating application bucket if necessary..."
+
+        aws --endpoint-url http://seaweedfs:8333 s3api head-bucket \
+          --bucket "$${S3_BUCKET_NAME}" >/dev/null 2>&1 \
+          || aws --endpoint-url http://seaweedfs:8333 s3 mb "s3://$${S3_BUCKET_NAME}"
+
+        echo "Creating Langfuse event bucket if necessary..."
+
+        aws --endpoint-url http://seaweedfs:8333 s3api head-bucket \
+          --bucket langfuse-events >/dev/null 2>&1 \
+          || aws --endpoint-url http://seaweedfs:8333 s3 mb s3://langfuse-events
+
+        echo "SeaweedFS bucket initialization completed."
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID in .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY in .env}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+      AWS_EC2_METADATA_DISABLED: "true"
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-agentlab-objects}
+    depends_on:
+      - seaweedfs
+    networks:
+      - agentlab
+
+
+  # ==========================================
+  # CLICKHOUSE
+  # Langfuse analytics
+  # ==========================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3.62.3
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}
+      TZ: UTC
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - agentlab
+
+  # ==========================================
+  # LANGFUSE WEB
+  # ==========================================
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:${LANGFUSE_IMAGE_TAG:-4}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      seaweedfs-init:
+        condition: service_completed_successfully
+    environment: &langfuse-environment
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3002}
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@postgres:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+
+      TELEMETRY_ENABLED: "false"
+
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      REDIS_CONNECTION_STRING: redis://:${VALKEY_PASSWORD}@valkey:6379/1
+
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${S3_REGION:-us-east-1}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://seaweedfs:8333
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+
+    ports:
+      - "127.0.0.1:3002:3000"
+    networks:
+      - agentlab
+
+  # ==========================================
+  # LANGFUSE WORKER
+  # ==========================================
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:${LANGFUSE_IMAGE_TAG:-4}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      seaweedfs-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *langfuse-environment
+    networks:
+      - agentlab
+
+# ==========================================
+# NETWORKS
+# ==========================================
+
+networks:
+  agentlab:
+    driver: bridge
+
+# ==========================================
+# PERSISTENT VOLUMES
+# ==========================================
+
+volumes:
+  postgres-data:
+  valkey-data:
+  qdrant-data:
+  seaweedfs-data:
+  clickhouse-data:
+  clickhouse-logs:
