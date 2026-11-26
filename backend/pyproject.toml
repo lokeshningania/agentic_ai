@@ -1,0 +1,64 @@
+
+[project]
+name = "agentlab"
+version = "0.1.0"
+description = "Agentic AI Engineering Lab"
+readme = "README.md"
+authors = [
+    { name = "Lokesh Yadav", email = "lokesh.yadav@vmartretail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "boto3>=1.44.12",
+    "deepeval>=4.3.6",
+    "fastapi>=0.165.0",
+    "langchain>=1.5.2",
+    "langchain-google-genai>=4.5.3",
+    "langchain-openai>=1.8.5",
+    "langfuse>=5.2.0",
+    "langgraph>=1.2.24",
+    "langgraph-checkpoint-postgres>=3.2.1",
+    "openpyxl>=3.1.5",
+    "pandas>=3.1.1",
+    "psycopg[binary]>=3.3.9",
+    "pydantic-settings>=2.16.3",
+    "pypdf>=7.1.1",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.34",
+    "qdrant-client>=1.20.0",
+    "redis>=8.2.0",
+    "sqlalchemy>=2.1.9",
+    "uvicorn[standard]>=0.54.0",
+    "valkey>=6.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+addopts = "-ra --strict-markers"
